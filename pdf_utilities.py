@@ -99,7 +99,7 @@ def text_extraction(pdf_name, images):
         slide_dict[image_path] = text
     
     # Save the dictionary to a JSON file
-    with open("dict_slides_text.json", "w") as json_file:
+    with open(f"dict_{pdf_name}.json", "w") as json_file:
         json.dump(slide_dict, json_file)
 
 
