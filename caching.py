@@ -118,7 +118,8 @@ def embed_mixed(image, text_model, token, use_openai):
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a professional Data Scientist. Provide a structured description of the image in 1-2 sentences. Focus on what you can see in the image."},
-                {"role": "user", "content": [{"type": "image_url", "image_url": image_data_uri}]}
+                {"role": "user", "content": [{"type": "image_url", "image_url": {
+                    "url": image_data_uri}}]}
             ]
         )
         
