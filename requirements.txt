@@ -21,3 +21,11 @@ python-gitlab
 python-pptx
 pdfplumber
 pdf2image
+datasets
+dask
+stackview
+umap-learn
+natsort
+seaborn
+byaldi
+PyPDF2
