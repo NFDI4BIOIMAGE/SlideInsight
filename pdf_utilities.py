@@ -12,27 +12,6 @@ from tqdm import tqdm
 from caching import load_full_hf_cache, get_zenodo_pdfs
 
 
-# Initialize models
-text_model = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
-clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-
-# Embedding functions
-def embed_text(pdf_filename, slide_number, text_model):
-    with pdfplumber.open(pdf_filename) as pdf:
-        text = pdf.pages[slide_number - 1].extract_text() or ""
-        return text_model.encode(text)
-
-
-def embed_visual(pdf_filename, slide_number, clip_processor, clip_model):
-    with pdfplumber.open(pdf_filename) as pdf:
-        image = pdf.pages[slide_number - 1].to_image().original
-        inputs = clip_processor(images=image, return_tensors="pt")
-        with torch.no_grad():
-            return clip_model.get_image_features(**inputs).squeeze().tolist()
-
-
 def load_pdf(pdf_name):
     """
     Load pdf and convert it to a list of its pages as images.
@@ -224,141 +203,7 @@ def text_extract_from_pdfs(downloads_folder="downloads", yaml_file_path="dict_sl
         yaml.dump(slide_dict, yaml_file, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
-
-def get_mixed_embedding(client, image_path, text_model):
-    """
-    Generates a structured description of an image using GPT-4o.
-
-    Parameters
-    ----------
-    client : ChatCompletionsClient
-        The GPT-4o client.
-    image_path : str
-        Path to the image.
-    text_model: str
-
-    Returns
-    -------
-    mixed_embedding:
-        Text Embedding of the models anwser. 
-    """
-    from azure.ai.inference import ChatCompletionsClient
-    from azure.ai.inference.models import (
-                SystemMessage,
-                UserMessage,
-                TextContentItem,
-                ImageContentItem,
-                ImageUrl,
-                ImageDetailLevel,
-            )
-    from azure.core.credentials import AzureKeyCredential 
-    import os
-    from PIL import Image
-
-        
-    endpoint = "https://models.inference.ai.azure.com"
-    token = os.environ["GITHUB_TOKEN"]
-    client = ChatCompletionsClient(
-            endpoint=endpoint,
-            credential=AzureKeyCredential(token),
-        )
-
-    response = client.complete(
-        messages=[
-            SystemMessage(
-                content="You are a professional Data Scientist. Provide a structured description of the image in 1-2 sentences."
-            ),
-            UserMessage(
-                content=[
-                    ImageContentItem(
-                        image_url=ImageUrl.load(
-                            image_file=image_path,
-                            image_format="png",
-                            detail=ImageDetailLevel.LOW
-                        )
-                    ),
-                ],
-            ),
-        ],
-        model="gpt-4o",
-    )
-
-    # Parse structured description from response
-    structured_response = response.choices[0].message.content
-    
-    # Convert the textual response into an embedding
-    mixed_embedding = text_model.encode(structured_response)
-
-    return mixed_embedding
-
-
-def calculate_text_embeddings(pdf_name, text_model, repo_name="lea-33/SlightInsight_Cache"):
-    """
-    Extracts text from each page of a PDF, computes text embeddings if not cached,
-    and stores them in the Hugging Face cache.
-
-    Parameters
-    ----------
-    pdf_name : str
-        The path to the PDF file from which text needs to be extracted.
-    text_model: SentenceTransformer
-        Text embedding model instance.
-    repo_name: str, optional
-        Name of the Hugging Face Hub repository for caching.
-
-    Returns
-    -------
-    dict
-        A dictionary where keys are page numbers (int) and values are text embeddings (array-like),
-        representing the encoded textual content of each page.
-    """
-    from datasets import load_dataset
-    import pdfplumber
-
-    # Ensure the repository exists or create a new one
-    full_repo_name = ensure_repo_exists(repo_name)
-
-    # Load or initialize the dataset
-    cache_dataset = load_cache_dataset(full_repo_name)
-    cached_keys = set(cache_dataset["key"]) if "key" in cache_dataset.column_names else set()
-
-    # Prepare to store results
-    text_embeddings = {}
-
-    with pdfplumber.open(pdf_name) as pdf:
-        for page_number, page in enumerate(pdf.pages):
-            key = f"{pdf_name}_page{page_number}"
-
-            # Check if the text embedding is already in the cache
-            if key in cached_keys:
-                cached_value = cache_dataset.filter(lambda x: x["key"] == key)["value"][0]
-
-                if "text_embedding" in cached_value and cached_value["text_embedding"]:
-                    text_embeddings[page_number] = cached_value["text_embedding"]
-                    continue
-
-            # If not cached, compute the embedding
-            text = page.extract_text() or ""  # Handle empty pages 
-            text_embedding = text_model.encode(text)
-            text_embeddings[page_number] = text_embedding
-
-            # Add the new embedding to the cache
-            new_entry = {
-                "key": key,
-                "value": {
-                    "text_embedding": text_embedding
-                }
-            }
-            cache_dataset = cache_dataset.add_item(new_entry)
-
-    # Push the updated cache dataset to Hugging Face Hub
-    cache_dataset.push_to_hub(full_repo_name)
-
-    return text_embeddings
-
-
-
-def process_slides(pdf_path, slides, client, clip_processor, clip_model, text_model, repo_name="lea-33/SlightInsight_Cache"):
+def OLD_process_slides(pdf_path, slides, client, clip_processor, clip_model, text_model, repo_name="lea-33/SlightInsight_Cache"):
     """
     Processes PDF slides to compute visual and mixed-modal embeddings, caching results on Hugging Face.
 
@@ -483,7 +328,7 @@ def process_slides(pdf_path, slides, client, clip_processor, clip_model, text_mo
 
 
 
-def download_all_pdfs(repo_name = "ScaDS-AI/SlideInsight_Cache", save_dir="zenodo_pdfs"):
+def download_all_pdfs(repo_name, save_dir="zenodo_pdfs"):
     """
     Downloads all unique PDFs listed in a dataframe using Zenodo record metadata.
 

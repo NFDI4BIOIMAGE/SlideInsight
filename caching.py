@@ -29,11 +29,44 @@ import yaml
 import re
 from pdf2image import convert_from_bytes
 import pandas as pd
+from openai import OpenAI
+from tqdm import tqdm
 
 # Initialize models
-text_model = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
-clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+#text_model = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1", trust_remote_code=True)
+text_model = SentenceTransformer("microsoft/harrier-oss-v1-0.6b", model_kwargs={"dtype": "auto"}, trust_remote_code=True)
+clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32", trust_remote_code=True, use_safetensors=True)
 clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+
+mixed_embed_prompt = """
+    You are an expert slide and presentation analyst. 
+    Your task is to examine a single presentation slide (provided as image) and describe its characteristics in a structured JSON-like dictionary.
+    
+    Return only a valid JSON object with these fields:
+    Content, Style, Language, Knowledge Level, Learning Perspective.
+    
+    Content: One simple sentence about the slides content
+    Style: What kind of slide is this? Options: Title, Closing, Divider, Content, Image, Infographic, Code, Table, Link, Placeholder, Quiz, None
+    Language: What language is used in the slide? Options: English, German, Mixed, None
+    Knowledge Level: What's the target group for this slide? Options: Beginner, Intermediate, Expert, None
+    Learning Perspective: What's the main learning objective for this slide? Options: Agenda/Learning Objectives, Tips/Recommendation, Considerations, Note, Guidelines, Criteria, 
+    Definition/Explanation, Components, Comparison, Examples, Options, Overview, Structure, Goals, Challenges, Purpose/Intent, Motivation/Rationale, Pros and Cons/Evaluation, 
+    Further Reading/Literature, Credits/Contacts, Questions, Summary/Conclusion, How-To/Demonstration, Informative/Descriptive, Introduction, None
+    
+    Different Options are seperated by commata, words seperated by backslashes belong to one option.
+    
+    For each characteristic, choose EXACT one of the options. Don't come up with new ideas, only choose the predifined options. If no option is suitable, choose None.
+    DON'T output anything else than the VALID JSON FORMAT dictionary that looks like this:
+    
+    {
+      "Content": "",
+      "Style": "",
+      "Language": "",
+      "Knowledge Level": "",
+      "Learning Perspective": ""
+    }
+    """
 
 
 # Function to check and create a repository if it doesn't exist
@@ -65,8 +98,8 @@ def load_cache_dataset(repo_name):
         return load_dataset(repo_name, split="train")
     except Exception:
         # If it doesn't exist, create a new dataset
-        return Dataset.from_dict({"key": [], "text_embedding": [], "visual_embedding": [], "mixed_embedding": [], "image": []})
-
+        return Dataset.from_list([])
+        
 
 # Embedding functions
 def embed_and_extract_text(pdf_filename, slide_number, text_model):
@@ -83,25 +116,22 @@ def embed_visual(pdf_filename, slide_number, clip_processor, clip_model):
             return clip_model.get_image_features(**inputs).squeeze().tolist()
 
 
-def embed_mixed(image, text_model, token, use_openai):
+def embed_mixed(image, text_model, token, use_api):
     """
-    Generates an embedding of a structured description of an image using GPT-4o.
+    Generates an embedding of a structured description of an image.
 
     Parameters
     ----------
     image : PIL.Image
     text_model: str
     token: str
-    use_openai: bool
+    use_api: str
 
     Returns
     -------
     mixed_embedding:
         Text Embedding of the models anwser. 
     """
- 
-    endpoint = "https://models.inference.ai.azure.com"
-    token = token
     
     # Convert PIL image to byte stream
     img_byte_arr = io.BytesIO()
@@ -110,7 +140,7 @@ def embed_mixed(image, text_model, token, use_openai):
     img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
     image_data_uri = f"data:image/png;base64,{img_base64}"
     
-    if use_openai:
+    if use_api == "use_openai":
         from openai import OpenAI
         
         client = OpenAI(api_key = token) 
@@ -118,19 +148,20 @@ def embed_mixed(image, text_model, token, use_openai):
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a professional Data Scientist. Provide a structured description of the image in 1-2 sentences. Focus on what you can see in the image."},
+                {"role": "system", "content": mixed_embed_prompt},
                 {"role": "user", "content": [{"type": "image_url", "image_url": {
                     "url": image_data_uri}}]}
             ]
         )
         
-    else:
+    elif use_api == "use_gh_models":
+        endpoint = "https://models.inference.ai.azure.com"
         client = ChatCompletionsClient(endpoint=endpoint,credential=AzureKeyCredential(token))
     
         response = client.complete(
             messages=[
                 SystemMessage(
-                    content="You are a professional Data Scientist. Provide a structured description of the image in 1-2 sentences. Focus on what you can see in the image."
+                    content=mixed_embed_prompt
                 ),
                 UserMessage(
                     content=[
@@ -142,6 +173,22 @@ def embed_mixed(image, text_model, token, use_openai):
             ],
             model="gpt-4o",
         )
+
+    elif use_api == "use_scads_api":
+        from openai import OpenAI
+        client = OpenAI(base_url="https://llm.scads.ai/v1", api_key=token)
+        response = client.chat.completions.create(
+            model="Qwen/Qwen3-VL-8B-Instruct",
+            messages=[
+                {"role": "system", "content": mixed_embed_prompt},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {
+                    "url": image_data_uri}}]}
+            ]
+        )
+
+
+    else:
+        print("No valid API KEY defined")
         
     # Parse structured description from response
     structured_response = response.choices[0].message.content
@@ -149,163 +196,10 @@ def embed_mixed(image, text_model, token, use_openai):
     # Convert the textual response into an embedding
     mixed_embedding = text_model.encode(structured_response)
 
-    return mixed_embedding
-            
-
-def caching_local(pdf_path):
-    """
-    Caches embeddings for each slide of a PDF, including the images.
-    
-    Parameters
-    ----------
-    pdf_path : str
-        Path to the PDF file.
-
-    Returns
-    -------
-    None
-    """
-    with shelve.open("local_cache.db", writeback=True) as cache:
-        slides = convert_from_path(pdf_path)
-
-        for slide_number, image in enumerate(slides, start=1):
-            key = f"{pdf_path}_slide{slide_number}"
-            
-            # Initialize the cache entry if not exists
-            if key not in cache:
-                cache[key] = {}
-
-            cached_data = cache[key]
-            updated = False  # Track if we update the cache
-
-            # Check and compute missing values
-            if "text" not in cached_data:
-                print(f"Generating text embedding for Slide {slide_number}")
-                cached_data["text"],_ = embed_and_extract_text(pdf_path, slide_number, text_model)
-                updated = True
-
-            if "visual" not in cached_data:
-                print(f"Generating visual embedding for Slide {slide_number}")
-                cached_data["visual"] = embed_visual(pdf_path, slide_number, clip_processor, clip_model)
-                updated = True
-
-            if "mixed" not in cached_data:
-                print(f"Generating mixed embedding for Slide {slide_number}")
-                cached_data["mixed"] = embed_mixed(image, text_model)
-                updated = True
-
-            if "image" not in cached_data:
-                print(f"Storing image for Slide {slide_number}")
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format="PNG")
-                cached_data["image"] = img_byte_arr.getvalue()
-                updated = True
-
-            # If we updated anything, commit changes
-            if updated:
-                cache[key] = cached_data  # Assign back to shelve
-                print(f"Slide {slide_number} cached successfully!")
-
-            else:
-                print(f"All data already cached for Slide {slide_number}")
+    return mixed_embedding, structured_response
 
 
-
-def load_local_cache(pdf_path, slide_number):
-    """
-    Loads embeddings and the image from the cache.
-
-    Parameters
-    ----------
-    pdf_path : str
-        Path to the PDF file.
-    slide_number : int
-        The slide number to retrieve.
-
-    Returns
-    -------
-    dict or None
-        A dictionary containing:
-        - "text": Text embedding
-        - "visual": Visual embedding
-        - "mixed": Mixed embedding
-        - "image": PIL.Image.Image
-        Returns None if no cached data is found.
-    """
-    with shelve.open("local_cache.db") as cache:
-        key = f"{pdf_path}_slide{slide_number}"
-        
-        if key in cache:
-            cached_data = cache[key]
-
-            # Convert stored image bytes back to PIL Image
-            if "image" in cached_data:
-                img_byte_arr = io.BytesIO(cached_data["image"])
-                cached_data["image"] = Image.open(img_byte_arr)
-
-            return cached_data  # Returns the entire dictionary
-        else:
-            print(f"No cached data found for {key}")
-            return None
-
-
-def load_single_hf_cache_OLD(record_id, slide_number, pdf_number = 1, repo_name="ScaDS-AI/SlightInsight_Cache"):
-    """
-    Loads embeddings and metadata from the Hugging Face cache for a single slide.
-
-    Parameters
-    ----------
-    record_id: str
-    slide_number : int
-        The slide number to retrieve.
-    pdf_number: int, optional
-    repo_name : str, optional
-        Name of the Hugging Face Hub dataset repository.
-
-    Returns
-    -------
-    dict or None
-        A dictionary containing:
-        - "text_embedding": Text embedding
-        - "visual_embedding": Visual embedding
-        - "mixed_embedding": Mixed embedding
-        - "extracted_text": Text that got extracted from current Slide
-        - "zenodo_record_id": Zenodo record ID
-        - "zenodo_filename": Original Zenodo file name
-        - "page_number": Slide number
-        Returns None if no cached data is found.
-    """
-
-    # Load dataset from Hugging Face Hub
-    try:
-        cache_dataset = load_dataset(repo_name, split="train")
-    except Exception as e:
-        print(f"Error loading dataset: {e}")
-        return None
-
-    key = f'record{record_id}_pdf{pdf_number}_slide{slide_number}'
-    # Search for the key in the dataset
-    for idx, cached_key in enumerate(cache_dataset["key"]):
-        if cached_key == key:
-            cached_data = {
-                "key": cache_dataset["key"][idx],
-                "text_embedding": cache_dataset["text_embedding"][idx],
-                "visual_embedding": cache_dataset["visual_embedding"][idx],
-                "mixed_embedding": cache_dataset["mixed_embedding"][idx],
-                "extracted_text": extracted_text["extracted_text"][idx],
-                "zenodo_record_id": cache_dataset["zenodo_record_id"][idx], 
-                "zenodo_filename": cache_dataset["zenodo_filename"][idx], 
-                "page_number": cache_dataset["page_number"][idx]
-            }
-
-            return cached_data
-
-    print(f"No cached data found for {key}")
-    return None
-
-
-
-def load_single_hf_cache(record_id, slide_number, pdf_number=1, parquet_path="hf://datasets/ScaDS-AI/SlideInsight_Cache/data/train-00000-of-00001.parquet"):
+def load_single_hf_cache(record_id, slide_number, parquet_path, pdf_number=1):
     """
     Loads a single row from the Hugging Face cache as a Pandas DataFrame.
 
@@ -315,10 +209,10 @@ def load_single_hf_cache(record_id, slide_number, pdf_number=1, parquet_path="hf
         The Zenodo record ID.
     slide_number : int
         The slide number to retrieve.
-    pdf_number : int, optional
-        The PDF number, defaults to 1.
     parquet_path : str
         Path to the .parquet file on the Hugging Face Hub.
+    pdf_number : int, optional
+        The PDF number, defaults to 1.
 
     Returns
     -------
@@ -344,15 +238,25 @@ def load_single_hf_cache(record_id, slide_number, pdf_number=1, parquet_path="hf
 
 
 
-def load_full_hf_cache(repo_name="ScaDS-AI/SlightInsight_Cache"):
+def load_full_hf_cache(repo_name):
     """
     Loads the entire dataset from the Hugging Face cache.
     Function has to be adapted, but it works right now.
+    
+    Parameters
+    ----------
+    repo_name : str, optional
+        Hugging Face dataset repository name.
+
+    Returns
+    -------
+    Pandas DataFrame of the Huggingface Dataset.
     """
     import pandas as pd
+    from datasets import load_dataset
 
-    # Login using e.g. `huggingface-cli login` to access this dataset
-    df = pd.read_parquet("hf://datasets/ScaDS-AI/SlideInsight_Cache/data/train-00000-of-00001.parquet")
+    ds = load_dataset(repo_name)
+    df = ds["train"].to_pandas()
 
     return df
 
@@ -429,7 +333,8 @@ def get_zenodo_ids_from_yaml(yaml_file, valid_licenses, unclear_licenses):
 # Function to fetch Zenodo record files (PDFs)
 def get_zenodo_pdfs(record_id):
     api_url = f"https://zenodo.org/api/records/{record_id}"
-    response = requests.get(api_url)
+    headers = {"User-Agent": "Mozilla/5.0 (Zenodo PDF Fetcher)"}
+    response = requests.get(api_url, headers=headers)
 
     if response.status_code != 200:
         print(f"Failed to fetch Zenodo record {record_id}, skipping...")
@@ -456,7 +361,7 @@ def download_pdf(pdf_url):
 
 
 # Main function to process each slide and store embeddings with metadata
-def cache_hf(zenodo_record_id, token, use_openai, repo_name="ScaDS-AI/SlightInsight_Cache"):
+def cache_hf(zenodo_record_id, token, use_api, repo_name):
     """
     Processes all PDF slides from a Zenodo record and stores embeddings with metadata.
 
@@ -466,9 +371,9 @@ def cache_hf(zenodo_record_id, token, use_openai, repo_name="ScaDS-AI/SlightInsi
         Zenodo record ID to fetch PDFs from.
     token: str
         Token for OpenAI or GH Models 
-    use_openai: bool
-        if True: uses OpenAI API, otherwise GH Models
-    repo_name : str, optional
+    use_api: str
+        Name of API to use SCADS, OpenAI API or GH Models
+    repo_name : str
         Hugging Face dataset repository name.
 
     Returns
@@ -483,12 +388,7 @@ def cache_hf(zenodo_record_id, token, use_openai, repo_name="ScaDS-AI/SlightInsi
     cache_dataset = load_cache_dataset(full_repo_name)
 
     # Get existing keys from the dataset
-    existing_keys = set(cache_dataset["zenodo_record_id"]) if "zenodo_record_id" in cache_dataset.column_names else set()
-
-    # **Check if the record already exists**
-    if zenodo_record_id in existing_keys:
-        print(f"Skipping Zenodo Record {zenodo_record_id}: Already in dataset.")
-        return  # Skip processing this record
+    existing_keys = set(cache_dataset["key"]) if "key" in cache_dataset.column_names else set()
         
     # Fetch all PDFs from the Zenodo record
     pdf_files = get_zenodo_pdfs(zenodo_record_id)
@@ -509,11 +409,6 @@ def cache_hf(zenodo_record_id, token, use_openai, repo_name="ScaDS-AI/SlightInsi
         with pdfplumber.open(pdf_bytes) as pdf:
             slides = pdf.pages  # List of all slides
 
-        # Initialize embedding models
-        text_model = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
-        clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
         # Process each slide
         new_data = []
 
@@ -521,11 +416,16 @@ def cache_hf(zenodo_record_id, token, use_openai, repo_name="ScaDS-AI/SlightInsi
             slide_number = i + 1
             slide_key = f"record{zenodo_record_id}_pdf{pdf_number + 1}_slide{slide_number}"
 
+            # Check if the slide already exists
+            if slide_key in existing_keys:
+                print(f"Skipping {slide_key}: already cached.")
+                continue
+
             text_embedding, extracted_text = embed_and_extract_text(pdf_bytes, i, text_model)
             visual_embedding = embed_visual(pdf_bytes, i, clip_processor, clip_model)
 
             page_image = slide.to_image().original  # Convert to PIL Image
-            mixed_embedding = embed_mixed(page_image, text_model, token, use_openai)
+            mixed_embedding, structured_response = embed_mixed(page_image, text_model, token, use_api)
 
             # Store metadata
             new_data.append({
@@ -536,21 +436,20 @@ def cache_hf(zenodo_record_id, token, use_openai, repo_name="ScaDS-AI/SlightInsi
                 "text_embedding": text_embedding,
                 "visual_embedding": visual_embedding,
                 "mixed_embedding": mixed_embedding,
-                "extracted_text": extracted_text,                
+                "structured_description": structured_response,
+                "extracted_text": extracted_text,  
             })
             
-        cache_dataset = append_rows_to_dataset(cache_dataset, new_data)
+        if new_data:
+            cache_dataset = append_rows_to_dataset(cache_dataset, new_data)
+            cache_dataset.push_to_hub(repo_name)
+            existing_keys.update(row["key"] for row in new_data)
+        
+        #cache_dataset = append_rows_to_dataset(cache_dataset, new_data)
     
     # Push dataset to Hugging Face Hub
-    cache_dataset.push_to_hub(repo_name)
+    #cache_dataset.push_to_hub(repo_name)
 
 
     print(f"Finished processing Zenodo Record {zenodo_record_id}.")
-
-
-
-
-
-
-
-
+    

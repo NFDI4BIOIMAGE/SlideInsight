@@ -7,7 +7,7 @@ This repository contains a collection of notebooks for gaining insights into pre
 
 - Improve our understanding about [how different types of embeddings represent the same content](Inspect_Embeddings/Compare_distorted_Embeddings.ipynb). For this task, some presentation slides are adapted to see whether text, visual or mixed-modal embeddings perform comparably well in representating a slides features, when the slide is changed in a specific manner. For this, slides are adapted from the Bio-image Data Science Lectures.
 
-- Establishing a [cache](https://huggingface.co/datasets/ScaDS-AI/SlideInsight_Cache) that stores a text embedding, visual embedding, mixed embedding and the extracted text for each slide from the collection. Besides that, there is also a dataset available that stores each [slide as an image](https://huggingface.co/datasets/ScaDS-AI/Slide_Insight_Images) and shares a corresponding key with the embeddings from the cache dataset.
+- Establishing a [cache](https://huggingface.co/datasets/ScaDS-AI/SlideInsight_Cache_v2) that stores a text embedding, visual embedding, mixed embedding and the extracted text for each slide from the collection. Besides that, there is also a dataset available that stores each [slide as an image](https://huggingface.co/datasets/ScaDS-AI/Slide_Insight_Images_v2) and shares a corresponding key with the embeddings from the cache dataset.
 
 - The cached embeddings can then be used to [visualize the embeddings](Inspect_Embeddings/Visualize_HF_Embeddings.ipynb) and gain insights into the contents.
 
